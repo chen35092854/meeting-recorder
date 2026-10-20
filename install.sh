@@ -62,8 +62,9 @@ echo "√ 检测到 Python: $("$PYTHON_BIN" --version 2>&1)"
 # 必须在创建 venv 之前用「系统 Python」检测：venv 继承系统 Python 的
 # _tkinter 能力，Homebrew 的 python 默认不带 Tk（需额外 python-tk 包），
 # 若等到启动时才 import 失败，用户会白等几分钟依赖安装（2026-10-20 实测）。
-# v1.0.9：全自动——检测到缺 Tk 就自动 brew install 补装，失败自动重试一次；
-# 全程不需要用户手动敲任何命令（同事实测"不会手动下载"的教训）。
+# v1.0.10：全自动 + 版本降级——老版本(如 3.11，已 EOL)的 python-tk 无 bottle，
+# 自动改用受支持的 python-tk@3.13/3.12/3.14（连带装新 Python），全程无手动命令；
+# 并用 yes 管道应答 brew 的 [y/n] 交互确认（同事实测 no bottle 教训）。
 if ! "$PYTHON_BIN" -c "import tkinter" >/dev/null 2>&1; then
   PY_SHORT="$("$PYTHON_BIN" -c 'import sys; v=sys.version_info; print(f"{v.major}.{v.minor}")' 2>/dev/null || true)"
   echo ""
@@ -76,43 +77,64 @@ if ! "$PYTHON_BIN" -c "import tkinter" >/dev/null 2>&1; then
     echo "  （约几十 MB，请耐心等待，过程中不要关闭窗口）…"
     echo ""
     if command -v brew >/dev/null 2>&1; then
-      # HOMEBREW_NO_AUTO_UPDATE：跳过 brew 自身的自动更新，直接安装（快很多）
-      echo "  → 第 1 次尝试安装 python-tk@$PY_SHORT …"
-      if HOMEBREW_NO_AUTO_UPDATE=1 brew install "python-tk@$PY_SHORT"; then
-        TK_INSTALLED=1
-      else
-        echo "    未成功，自动重试…"
-        if HOMEBREW_NO_AUTO_UPDATE=1 brew install "python-tk@$PY_SHORT"; then
-          TK_INSTALLED=1
+      TK_LOG="$(mktemp -t tk_install)"
+      TK_ANS="$(mktemp -t tk_ans)"
+      echo "y" > "$TK_ANS"  # 预写 y：应答 brew 的 [y/n] 交互确认（避免卡住/放弃）
+      # 尝试给指定版本安装 python-tk；成功且对应 Python 可 import 返回 0
+      try_tk_ver() {
+        ver="$1"
+        echo "  → 尝试安装 python-tk@$ver …"
+        # 用 stdin 重定向喂 y（不用管道，避免 zsh/bash 的 PIPESTATUS 差异）
+        HOMEBREW_NO_AUTO_UPDATE=1 brew install "python-tk@$ver" \
+          < "$TK_ANS" >>"$TK_LOG" 2>&1 || return 1
+        # 优先探测该版本对应的 Python（新装时会连带 python@$ver）
+        cand="$(brew --prefix "python@$ver" 2>/dev/null)/libexec/bin/python$ver"
+        if [ -x "$cand" ] && "$cand" -c "import tkinter" >/dev/null 2>&1; then
+          PYTHON_BIN="$cand"
+          PY_SHORT="$ver"
+          return 0
         fi
-      fi
-      if [ "${TK_INSTALLED:-0}" = "1" ]; then
-        # 旧 .venv 可能是缺 Tk 时建的残缺环境，删掉让后续流程重建
+        # 同版本场景：原 Python 直接用
+        if "$PYTHON_BIN" -c "import tkinter" >/dev/null 2>&1; then
+          return 0
+        fi
+        return 1
+      }
+      TK_INSTALLED=0
+      for v in "$PY_SHORT" 3.13 3.12 3.14; do
+        if [ "$v" = "$PY_SHORT" ]; then
+          msg="你的版本 python-tk@$v"
+        else
+          msg="你的版本已停止支持，自动改用受支持的 python-tk@$v"
+        fi
+        echo "  （$msg）"
+        if try_tk_ver "$v"; then
+          TK_INSTALLED=1
+          break
+        fi
+      done
+      if [ "$TK_INSTALLED" = "1" ]; then
+        # 旧 .venv 可能是缺 Tk 时建的残缺环境 / 旧 Python 版本，删掉让后续流程重建
         if [ -d ".venv" ]; then
           rm -rf .venv
           echo "  （已清理旧的 .venv，将自动重建）"
         fi
-        if "$PYTHON_BIN" -c "import tkinter" >/dev/null 2>&1; then
-          echo "√ Tk 图形库安装成功，继续…"
-        else
-          echo ""
-          echo "✖ Tk 图形库已安装，但当前 Python 仍无法加载它。"
-          echo "  请关闭本窗口后重新双击本文件再试一次（会自动重新检测）。"
-          echo ""
-          echo "按回车关闭窗口…"
-          read -r dummy || true
-          exit 1
-        fi
+        echo "√ Tk 图形库安装成功，继续…"
       else
         echo ""
-        echo "✖ 自动安装两次均未成功（多为网络问题）。"
+        echo "✖ 自动尝试 4 个版本均未成功（多为网络或 brew 源问题）。"
+        echo "  错误详情（供排查）："
+        tail -6 "$TK_LOG" 2>/dev/null | sed 's/^/    /'
+        echo ""
         echo "  请检查网络连接（或关闭代理软件）后，关闭本窗口重新双击本文件，"
-        echo "  会自动重试安装；多次失败请把本窗口截图发给测试负责人。"
+        echo "  会自动重试；多次失败请把本窗口截图发给测试负责人。"
+        rm -f "$TK_LOG" "$TK_ANS"
         echo ""
         echo "按回车关闭窗口…"
         read -r dummy || true
         exit 1
       fi
+      rm -f "$TK_LOG" "$TK_ANS"
     else
       echo "  未检测到 brew 命令（Homebrew 缺失），无法自动安装。"
       echo "  请把本窗口截图发给测试负责人协助处理。"
