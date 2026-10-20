@@ -33,14 +33,24 @@ def main() -> int:
     )
     logging.info("启动会议录音：%s", args.title)
 
+    # 首次运行：先弹 4 步配置向导（环境检查 / AI 纪要 / 保存目录），
+    # 完成或关闭后清空向导控件，继续构建主界面
+    import tkinter as tk
+    from app.setup_wizard import SetupWizard, needs_first_run
+
+    root = tk.Tk()
+    if needs_first_run():
+        wiz = SetupWizard(root, cfg)
+        root.mainloop()          # 向导驱动事件循环；完成/关闭后返回
+        wiz.dispose()
+        cfg = config.load()      # 向导可能已修改配置（LLM/保存目录），重新加载
+
     # 应用启动即后台预热识别模型（whisper + 声纹），消除首次转写延迟
     from app.pipeline import preload_models
     preload_models(cfg)
 
-    import tkinter as tk
     from app.gui import RecorderApp
 
-    root = tk.Tk()
     RecorderApp(root, cfg)
     root.mainloop()
     return 0

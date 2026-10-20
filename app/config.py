@@ -7,7 +7,17 @@ import pathlib
 APP_DIR = pathlib.Path(__file__).resolve().parent.parent
 CONFIG_PATH = APP_DIR / "config.json"
 
-OBSIDIAN_DIR_DEFAULT = "/Users/eric/Library/CloudStorage/坚果云-chen35092854@gmail.com/我的坚果云/Obsidian库/eric的记事本/02 中智咨询/02 工作相关记录与成果/03 会议纪要"
+
+def _default_obsidian_dir() -> str:
+    """纪要保存默认目录：用户 Documents/会议纪要（不再硬编码任何人本机路径）。
+
+    多用户分发要求：不同电脑上该目录不存在/无权限时，_ensure_dirs 自动回退，
+    程序永不因路径崩溃；后续 GUI「设置」页可自行修改保存位置。
+    """
+    return str(pathlib.Path.home() / "Documents" / "会议纪要")
+
+
+OBSIDIAN_DIR_DEFAULT = _default_obsidian_dir()
 
 DEFAULTS = {
     "asr": {
@@ -65,8 +75,12 @@ def load() -> dict:
         except Exception as e:  # noqa: BLE001
             print(f"[config] 读取 config.json 失败，使用默认配置: {e}")
     obj = cfg.get("output", {})
-    if obj and obj.get("obsidian_dir"):
-        obj["obsidian_dir"] = os.path.expanduser(obj["obsidian_dir"])
+    obs = (obj.get("obsidian_dir") or "").strip()
+    if not obs:
+        # 未设置/空值（新分发场景）→ 使用默认目录，避免保存到程序目录
+        obs = OBSIDIAN_DIR_DEFAULT
+        obj["obsidian_dir"] = obs
+    obj["obsidian_dir"] = os.path.expanduser(obs)
     _ensure_dirs(cfg)
     return cfg
 
@@ -87,7 +101,15 @@ def _ensure_dirs(cfg: dict) -> None:
     if obj:
         obs = obj.get("obsidian_dir")
         if obs:
-            pathlib.Path(obs).mkdir(parents=True, exist_ok=True)
+            try:
+                pathlib.Path(obs).mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                # 路径不可创建（无权限/盘符不存在）→ 回退到用户 Documents/会议纪要，
+                # 保证任何电脑上都能正常保存纪要 md（2026-10-20 多用户分发修复）
+                print(f"[config] 纪要目录不可用，回退默认: {obs} ({e})")
+                fb = _default_obsidian_dir()
+                pathlib.Path(fb).mkdir(parents=True, exist_ok=True)
+                obj["obsidian_dir"] = fb
 
 
 def save(cfg: dict) -> None:

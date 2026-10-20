@@ -17,6 +17,7 @@ import json
 import logging
 import re
 import ssl
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -123,7 +124,11 @@ def load_env() -> dict:
 def _placeholder(v: str) -> bool:
     """API Key 是否仍为占位（用户尚未填写）。"""
     v = (v or "").strip().lower()
-    return (not v) or any(t in v for t in ("请填写", "your key", "xxxx", "sk-xxx", "替换"))
+    for t in ("请填写", "请在此", "请在此处", "在此输入", "请输入",
+              "your key", "xxxx", "sk-xxx", "替换", "占位", "placeholder"):
+        if t in v:
+            return True
+    return not v
 
 
 def is_configured() -> bool:
@@ -161,6 +166,75 @@ def _chat(base_url: str, api_key: str, model: str, messages: list[dict],
                 str(choice.get("finish_reason") or "stop"))
     except (KeyError, IndexError, TypeError) as e:
         raise RuntimeError(f"接口返回格式异常: {str(data)[:300]}") from e
+
+
+def ping(base_url: str, api_key: str, model: str,
+         verify_ssl: bool = True, timeout: int = 15) -> tuple[bool, str]:
+    """连通性 & 鉴权测试：发一个最小 chat/completions 请求。
+
+    供配置向导「测试连接」按钮使用。返回 (是否成功, 面向用户的提示)。
+    保持零外部依赖（标准库 urllib）。
+    """
+    if not api_key:
+        return False, "请先填写 API Key"
+    base = base_url.rstrip("/")
+    url = base if base.endswith("/chat/completions") else base + "/chat/completions"
+    body = {
+        "model": model or "",
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+        "temperature": 0,
+        "stream": False,
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    ctx = ssl._create_unverified_context() if not verify_ssl else None
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            status = resp.status
+            raw = resp.read().decode("utf-8", "ignore")
+    except urllib.error.HTTPError as e:
+        # 注意:HTTPError 是 URLError 的子类,必须在其之前捕获,
+        # 否则 4xx/5xx 会被误判为「无法连接接口」(2026-10-20 修复)
+        status = e.code
+        raw = ""
+        try:
+            raw = e.read().decode("utf-8", "ignore")[:120]
+        except Exception:  # noqa: BLE001
+            pass
+        if status in (401, 403):
+            return False, f"接口拒绝访问（HTTP {status}）——请检查 API Key 是否正确"
+        if status in (404, 405):
+            return False, f"接口路径似乎不对（HTTP {status}）——请检查接口地址"
+        return False, f"接口返回异常（HTTP {status}）：{raw or e.reason}"
+    except urllib.error.URLError as e:  # noqa: BLE001
+        reason = getattr(e, "reason", e)
+        text = str(reason)
+        if isinstance(reason, ssl.SSLCertVerificationError) \
+                or "CERTIFICATE_VERIFY_FAILED" in text:
+            return False, "SSL 证书校验失败——可勾选「跳过 SSL 校验」后重试"
+        if "getaddrinfo" in text:
+            return False, f"无法解析域名（接口地址可能不对）：{text}"
+        return False, f"无法连接接口（网络/代理/地址问题）：{text}"
+    except Exception as e:  # noqa: BLE001
+        return False, f"连接失败：{type(e).__name__}: {e}"
+    if status == 200:
+        try:
+            if json.loads(raw).get("choices"):
+                return True, "✓ 连接成功：鉴权与模型均正常"
+        except Exception:  # noqa: BLE001
+            pass
+        return True, "✓ 连接成功（HTTP 200）"
+    if status in (401, 403):
+        return False, f"接口拒绝访问（HTTP {status}）——请检查 API Key 是否正确"
+    if status in (404, 405):
+        return False, f"接口路径似乎不对（HTTP {status}）——请检查接口地址"
+    return False, f"接口返回异常（HTTP {status}）：{raw[:120]}"
 
 
 def _is_minutes_complete(text: str, finish: str) -> bool:

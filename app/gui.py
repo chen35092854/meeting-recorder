@@ -165,6 +165,13 @@ class RecorderApp:
         self.text.tag_configure("err", foreground=RED, font=(FONT, 12, "bold"))
         self._append("sys", "使用说明：点击「开始录音」→ 说话时上方电平条跳动、正文实时显示分声轨转写"
                             "→ 会议结束点击「结束会议」→ 自动保存转写并调用配置的模型接口生成纪要保存到 Obsidian。\n")
+        try:
+            from . import summarize as _sum
+            if not _sum.is_configured():
+                self._append("sys", "提示：尚未配置 AI 纪要接口，点击「设置」可两步完成"
+                                    "（可选；不配置也能正常录音转写）。\n")
+        except Exception:  # noqa: BLE001
+            pass
 
         # ---- 底部操作条：side="bottom" 优先锁定，防止被转写区挤出窗口 ----
         foot = ttk.Frame(r, style="Card.TFrame", padding=(18, 12))
@@ -177,6 +184,9 @@ class RecorderApp:
         self.btn_open = ttk.Button(foot, text="打开纪要文件夹", command=self.open_folder,
                                    state="disabled")
         self.btn_open.pack(side="left")
+        self.btn_settings = ttk.Button(foot, text="设置", width=8,
+                                       command=self.open_settings)
+        self.btn_settings.pack(side="left", padx=(10, 0))
 
         self.progress = ttk.Progressbar(foot, mode="determinate", maximum=100,
                                         value=0, length=240)
@@ -348,12 +358,12 @@ class RecorderApp:
             self.progress.config(value=15)
             self.status_var.set("转写已保存；自动生成未完成"
                                 + ("" if msg is None else "（详见下方提示）"))
-            self.stage_var.set("请检查 .env 配置后重新结束会议，或回对话由内置模型生成")
+            self.stage_var.set("请点「设置」补全 AI 纪要配置后重新结束会议，或回对话由内置模型生成")
             detail = f"详情：{msg}\n" if msg else ""
             self._append("sys", "\n[提示] 自动生成未完成。\n"
                                 f"{detail}"
-                                "1) 打开 meeting-recorder/.env，确认 LLM_BASE_URL / LLM_API_KEY（"
-                                "内网证书报错时设 LLM_SSL_VERIFY=false）后保存；下次点击「结束会议」即自动生成；\n"
+                                "1) 点击「设置」填写接口地址与 API Key（公司内网证书报错时勾选"
+                                "「跳过 SSL 校验」），保存后重新点「结束会议」即自动生成；\n"
                                 "2) 或回到 WorkBuddy 对话发送任意消息，由对话内置模型生成纪要，本进度条同样会同步。\n")
         elif kind == "error":
             self.recording = False
@@ -517,6 +527,24 @@ class RecorderApp:
             subprocess.Popen(["open", "-R", target])
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("打开失败", str(e))
+
+    def open_settings(self) -> None:
+        """打开配置向导（模态子窗口）：AI 纪要（LLM）+ 纪要保存目录。"""
+        from .setup_wizard import SetupWizard
+        from . import summarize
+        wiz = SetupWizard(self.root, self.cfg, as_toplevel=True)
+        try:
+            self.root.wait_window(wiz.win)
+        finally:
+            if wiz.done:
+                d = self.cfg["output"].get("obsidian_dir", "")
+                configured = summarize.is_configured()
+                hint = ("AI 纪要已配置，下次「结束会议」即可自动生成。"
+                        if configured
+                        else "尚未配置 AI 纪要，可随时再点「设置」补填（可选）。")
+                self._append("sys", f"\n[设置已保存] 纪要目录：{d}；{hint}\n")
+                self.status_var.set("设置已保存" if configured
+                                    else "设置已保存（未配置 AI 纪要）")
 
     def _show_error(self, title: str, e: Exception) -> None:
         msg = str(e)

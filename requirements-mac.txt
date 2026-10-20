@@ -1,0 +1,20 @@
+# macOS（Apple Silicon 与 Intel 通用）依赖清单
+# 说明：
+# - MLX 系（mlx / mlx-whisper）仅 Apple Silicon 可安装且能加速；
+#   Intel Mac 上 mlx 装不上，pipeline 会自动回退 faster-whisper CPU。
+# - 录音后端：sounddevice（macOS wheel 自带 PortAudio，无需 Homebrew）→ PyAV。
+#   不再使用 pyaudio：PyPI 无 macOS 预编译 wheel，源码编译需要 portaudio.h
+#   （brew install portaudio），同事机器装不上（2026-10-20 实测）。
+# - Windows 用户请使用 requirements-win.txt（不含 MLX）。
+faster-whisper>=1.0.3
+numpy>=1.26,<2.3
+sounddevice>=0.4.6
+av>=12.0
+requests>=2.31
+opencc-python-reimplemented>=0.1.7
+torch>=2.7
+torchaudio>=2.7
+speechbrain>=1.0.0
+mlx>=0.30
+mlx-whisper>=0.4
+silero-vad>=6.0

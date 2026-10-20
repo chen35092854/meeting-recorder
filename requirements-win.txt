@@ -1,0 +1,13 @@
+# Windows 依赖清单（x86_64）
+# 说明：不含 mlx / mlx-whisper（仅 Apple Silicon 可用）；
+#       ASR 走 faster-whisper CPU int8；录音走 sounddevice（规避 pyaudio 安装坑）。
+faster-whisper>=1.0.3
+numpy>=1.26,<2.3
+sounddevice>=0.4.6
+av>=12.0
+requests>=2.31
+opencc-python-reimplemented>=0.1.7
+torch>=2.7
+torchaudio>=2.7
+speechbrain>=1.0.0
+silero-vad>=6.0

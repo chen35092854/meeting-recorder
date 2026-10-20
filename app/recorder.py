@@ -2,9 +2,10 @@
 """麦克风采集（多后端自适应）：pyaudio → sounddevice → av(avfoundation)。
 
 优先选择自带音频库的后端，避免依赖 Homebrew 系统库：
-- pyaudio 的 macOS wheel 内嵌 PortAudio，开箱即用；
-- sounddevice 需要系统有 libportaudio；
-- av (PyAV) 内嵌 FFmpeg，用 avfoundation 输入设备采集，作为最后兜底。
+- pyaudio：PyPI 无 macOS 预编译 wheel（源码编译需 portaudio.h），
+  requirements-mac.txt 已将其移除；代码保留分支仅为兼容自装用户；
+- sounddevice：macOS wheel 内嵌 PortAudio，开箱即用（主要后端）；
+- av (PyAV)：内嵌 FFmpeg，用 avfoundation 输入设备采集，作为最后兜底。
 
 统一输出 float32 mono 16kHz，满一个分块即产出（含绝对起始时间戳），
 分块同时累积到完整录音数组，供结束时保存 WAV。

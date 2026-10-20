@@ -15,24 +15,25 @@
 
 ## 快速开始
 
-### 1. 安装依赖（首次一次性）
+### 1. 一键启动（唯一入口）
 ```bash
-cd /Users/eric/WorkBuddy/2026-10-16-16-03-31/meeting-recorder
+cd <项目目录>
 bash install.sh
 ```
-说明：创建独立 `.venv` 虚拟环境；音频采集优先使用自带音频库的 PyAudio/sounddevice/PyAV，无需 Homebrew；语音模型首次运行自动下载（走国内镜像 hf-mirror.com）。
+或直接**双击 `install.sh`**：脚本会自动 ①检查环境 → ②缺依赖自动安装（首次约 2~5 分钟，创建独立 `.venv`）→ ③启动录音界面。依赖已装好时跳过安装、秒开。
+说明：音频采集优先使用自带音频库的 sounddevice/PyAV，无需 Homebrew；语音模型首次运行自动下载（走国内镜像 hf-mirror.com）。
 
-### 2. 启动录音（三种方式任选）
+### 2. 其他启动方式（依赖就绪后）
 - **快捷指令**：在 WorkBuddy 对话输入 `/meeting-recorder`，或同义指令 `/录音`、`/会议录制`、`/开始会议`（自然语言"开始录音/开会了"同样有效）；
-- **双击（推荐）**：`MeetingRecorder.app`（标准应用，无需终端窗口，直接弹出 GUI）；
-- **双击（备选）**：`launch.command`（会打开终端窗口，录音期间请勿关闭）；
-- **命令行**：`arch -arm64 ./.venv/bin/python run_recorder.py`。
+- **命令行**：`./.venv/bin/python run_recorder.py`。
+
+> 启动器统一为 `install.sh`（安装 + 启动合一）；旧的 `launch.command`、`MeetingRecorder.app` 已不再提供。
 
 **双击启动说明**：
-1. Finder 中按 `⌘⇧G` 输入 `/Users/eric/WorkBuddy/2026-10-16-16-03-31/meeting-recorder` 回车定位；
-2. 双击 `MeetingRecorder.app` → GUI 直接弹出（推荐，无终端窗口）；双击 `launch.command` → 会打开"终端"窗口启动，**录音期间请勿关闭该终端窗口**；
+1. Finder 进入项目（或解压后的文件夹），双击 `install.sh`；
+2. 若被文本编辑器打开（部分 Mac 默认关联）：右键 `install.sh` → 打开方式 → 其他… → 选「终端」并勾选「始终以此方式打开」；
 3. 首次双击若被 macOS 拦截：右键 → 「打开」→ 再点「打开」；
-4. 日常便捷：右键 `MeetingRecorder.app` → 「制作替身」或将 App 直接拖到程序坞，以后一键启动。
+4. 录音期间请勿关闭该终端窗口。
 
 会议结束后**自动生成纪要并保存 Obsidian，全程无需回到对话**（仅当 `.env` 未配置 Key 或接口失败时，回对话发送“生成会议纪要”可兜底生成）。
 
@@ -58,8 +59,7 @@ LLM_SSL_VERIFY=true                                                  # 内网自
 ```
 meeting-recorder/
 ├── run_recorder.py          # 入口（GUI）
-├── install.sh               # 一键安装依赖
-├── launch.command           # 双击启动
+├── install.sh               # 一键启动（自动安装依赖 + 启动 GUI，唯一入口）
 ├── config.json              # 配置（模型、路径、声纹阈值等）
 ├── .env                     # 文本模型接口：地址 / Key（自行填写）/ 模型名
 ├── requirements.txt
@@ -110,7 +110,7 @@ meeting-recorder/
 
 ## 常见问题
 
-- **启动闪退（numpy 架构错误）**：本机依赖均为 Apple Silicon 原生（arm64）版本；若经终端/LaunchServices 启动时被切换到 Rosetta（x86_64）会报 `incompatible architecture`。所有官方启动器（`.app`、`launch.command`）已内置 `arch -arm64` 强制原生架构；若仍出现，手动执行 `arch -arm64 ./.venv/bin/python run_recorder.py`。
+- **启动闪退（numpy 架构错误）**：本机依赖均为 Apple Silicon 原生（arm64）版本；若经终端/LaunchServices 启动时被切换到 Rosetta（x86_64）会报 `incompatible architecture`。手动执行 `arch -arm64 ./.venv/bin/python run_recorder.py` 即可强制原生架构。
 - **模型下载失败**：检查网络；或改为官方源 `export HF_ENDPOINT=https://huggingface.co` 后重试。
 - **无法录音**：麦克风授权（系统设置→隐私与安全性）；或 GUI 中更换输入设备（外接麦克风）。
 - **分人不准**：阈值调高到 0.75~0.80 更保守（少误分），调低更敏感（少合并）。
