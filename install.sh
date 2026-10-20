@@ -58,6 +58,35 @@ if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,
 fi
 echo "√ 检测到 Python: $("$PYTHON_BIN" --version 2>&1)"
 
+# ---------- 2.5 检测 Tk 图形库（GUI 依赖） ----------
+# 必须在创建 venv 之前用「系统 Python」检测：venv 继承系统 Python 的
+# _tkinter 能力，Homebrew 的 python 默认不带 Tk（需额外 python-tk 包），
+# 若等到启动时才 import 失败，用户会白等几分钟依赖安装（2026-10-20 实测）。
+if ! "$PYTHON_BIN" -c "import tkinter" >/dev/null 2>&1; then
+  PY_SHORT="$("$PYTHON_BIN" -c 'import sys; v=sys.version_info; print(f"{v.major}.{v.minor}")' 2>/dev/null || true)"
+  echo ""
+  echo "✖ 当前 Python 缺少 Tk 图形库（_tkinter），录音界面依赖它，无法启动。"
+  echo "  检测到 Python: $("$PYTHON_BIN" --version 2>&1)（路径：$PYTHON_BIN）"
+  if echo "$PYTHON_BIN" | grep -q "homebrew"; then
+    if [ -n "$PY_SHORT" ]; then
+      echo "  你是用 Homebrew 安装的 Python，请先安装 Tk 支持包："
+      echo "      brew install python-tk@$PY_SHORT"
+      echo "  （版本号与你的 Python 对应，如 python@3.11 就装 python-tk@3.11）"
+    else
+      echo "  你是用 Homebrew 安装的 Python，请先安装 Tk 支持包：brew install python-tk"
+    fi
+    echo ""
+  fi
+  echo "  或改用 python.org 官方 Python（自带 Tk 支持，推荐）："
+  echo "      https://www.python.org/downloads/"
+  echo "  安装完成后，删除本目录下的 .venv 文件夹，再重新双击本文件。"
+  echo ""
+  echo "按回车关闭窗口…"
+  read -r dummy || true
+  exit 1
+fi
+echo "√ Tk 图形库就绪"
+
 # ---------- 3. 依赖检查 / 自动安装 ----------
 NEED_INSTALL=1
 if [ -x "$VENV_PY" ]; then
