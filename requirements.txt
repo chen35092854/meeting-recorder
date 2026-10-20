@@ -1,0 +1,13 @@
+faster-whisper>=1.0.3
+numpy>=1.26,<2.3
+pyaudio>=0.2.14
+sounddevice>=0.4.6
+av>=12.0
+requests>=2.31
+opencc-python-reimplemented>=0.1.7
+torch>=2.7
+torchaudio>=2.7
+speechbrain>=1.0.0
+mlx>=0.30
+mlx-whisper>=0.4
+silero-vad>=6.0

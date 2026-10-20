@@ -1,0 +1,51 @@
+{
+  "asr": {
+    "backend": "mlx",
+    "mlx_model": "mlx-community/whisper-small-mlx",
+    "model_size": "small",
+    "device": "cpu",
+    "compute_type": "int8",
+    "language": "zh",
+    "punctuate": true,
+    "no_speech_threshold": 0.55,
+    "logprob_threshold": -0.8,
+    "beam_size": 5,
+    "chunk_seconds": 6,
+    "simplify_zh": true
+  },
+  "diarize": {
+    "enabled": true,
+    "threshold": 0.6,
+    "temporal_threshold": 0.55,
+    "model": "speechbrain/spkrec-ecapa-voxceleb",
+    "min_speaker_segment": 1.5,
+    "merge_gap": 3.0,
+    "max_utt_chars": 200
+  },
+  "vad": {
+    "enabled": true,
+    "min_speech": 0.5,
+    "min_silence": 2.0,
+    "max_segment": 30,
+    "silero_threshold": 0.6
+  },
+  "audio": {
+    "sample_rate": 16000,
+    "channels": 1,
+    "silence_rms": 0.002,
+    "voice_peak": 0.01,
+    "min_zcr": 0.012
+  },
+  "output": {
+    "obsidian_dir": "/Users/eric/Library/CloudStorage/坚果云-chen35092854@gmail.com/我的坚果云/Obsidian库/eric的记事本/02 中智咨询/02 工作相关记录与成果/03 会议纪要",
+    "save_wav": true
+  },
+  "hf_endpoint": "https://hf-mirror.com",
+  "llm": {
+    "provider": "auto",
+    "ollama_url": "http://localhost:11434",
+    "openai_base_url": "",
+    "openai_api_key": "",
+    "openai_model": ""
+  }
+}

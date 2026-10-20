@@ -1,0 +1,16 @@
+# 运行产物/数据
+.venv/
+recordings/
+logs/
+__pycache__/
+*.pyc
+.DS_Store
+
+# 敏感凭证（纪要接口 Key、GitHub Token 等）
+.env
+
+# 版本归档
+releases/
+
+# Tk 运行时产生的 8 位随机临时文件（根目录）
+/[0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_]
