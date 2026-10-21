@@ -6,7 +6,8 @@
 - 主界面「设置」按钮：以模态子窗口（Toplevel）打开，随时可改。
 
 步骤（4 步）：
-1. 欢迎 & 环境检查（Python / 依赖 / 麦克风）
+1. 欢迎 & 环境检查（Python / 依赖 / 麦克风）＋ 语音识别模型下载（带进度，
+   确保进入主界面即可转写；v1.0.11 新增）
 2. AI 纪要（LLM）配置：写 .env（BASE_URL / API_KEY / MODEL / SSL_VERIFY），可跳过
 3. 纪要保存目录：写 config.json output.obsidian_dir
 4. 完成：落盘 + 写 wizard_done 标记
@@ -142,15 +143,17 @@ class SetupWizard:
     # ---------- 底部按钮 ----------
 
     def _footer(self, prev: bool = True, next_text: str = "下一步  >",
-                on_next=None, extra=None) -> None:
+                on_next=None, extra=None):
+        """底部按钮条；返回「下一步」按钮（供调用方按业务禁用/启用）。"""
         if extra:
             extra(self._foot)  # 左区可放「跳过此步」等
         if prev and self._page > 0:
             ttk.Button(self._foot, text="<  上一步",
                        command=lambda: self._go(self._page - 1)).pack(side="left")
-        ttk.Button(self._foot, text=next_text,
-                   command=on_next or (lambda: self._go(self._page + 1))
-                   ).pack(side="right", padx=(10, 0))
+        btn = ttk.Button(self._foot, text=next_text,
+                         command=on_next or (lambda: self._go(self._page + 1)))
+        btn.pack(side="right", padx=(10, 0))
+        return btn
 
     def _card(self) -> tk.Frame:
         f = tk.Frame(self._body, bg=CARD, highlightthickness=1,
@@ -168,6 +171,11 @@ class SetupWizard:
     # ================= 页面 =================
     # 各页把控件变量存入 self._v（dict），完成页读取
 
+    # ---------- 第 1 步：环境检查 + 语音识别模型下载（v1.0.11）----------
+    # 2026-10-21 同事机器修复：此前「首次开始录音时自动下载模型」且无任何
+    # 进度反馈，下载又走 Xet 协议在镜像下 401 → 转写永远空白。现在在向导
+    # 第 1 步就下载缺失模型并实时显示进度（MB + 百分比），确保进入主界面
+    # 时模型就绪、点击「开始录音」即可看到转写。
     def _page_welcome(self) -> None:
         self._v = {}
         card = self._card()
@@ -185,14 +193,227 @@ class SetupWizard:
                      ).pack(side="left", padx=(6, 0))
             tk.Label(row, text=detail, bg=CARD, fg=SUB, font=(FONT, 10)
                      ).pack(side="right")
-        tip = tk.Frame(card, bg="#eef4ff", highlightthickness=1,
-                       highlightbackground="#d3e2fc")
-        tip.pack(fill="x", padx=18, pady=(12, 16))
-        tk.Label(tip, text="首次开始录音时会自动下载语音识别模型"
-                           "（数百 MB，走国内镜像 hf-mirror.com），请耐心等待。",
-                 bg="#eef4ff", fg="#2956a3", font=(FONT, 11), justify="left",
-                 wraplength=500).pack(anchor="w", padx=12, pady=8)
-        self._footer(prev=False, next_text="下一步  >")
+        self._build_model_card()
+        self._next_btn = self._footer(
+            prev=False, next_text="下一步  >", on_next=self._welcome_next)
+        # 页面渲染完成后自动检测模型并启动下载（后台线程，不卡界面）
+        self.root.after(300, self._model_tick)
+
+    def _build_model_card(self) -> None:
+        """语音识别模型下载卡片：进度条 + 状态 + 重试 / 跳过。"""
+        from . import model_download as mdl
+        self._mdl = mdl
+        card = self._card()
+        head = tk.Frame(card, bg=CARD)
+        head.pack(fill="x", padx=18, pady=(14, 2))
+        tk.Label(head, text="语音识别模型（首次使用需下载，数百 MB）",
+                 bg=CARD, fg=TEXT, font=(FONT, 12, "bold")).pack(side="left")
+        self._model_status_lbl = tk.Label(head, text="检测中…", bg=CARD,
+                                          fg=SUB, font=(FONT, 10))
+        self._model_status_lbl.pack(side="right")
+        self._model_bar = ttk.Progressbar(card, mode="determinate",
+                                          maximum=100, value=0)
+        self._model_bar.pack(fill="x", padx=18, pady=(6, 2))
+        self._model_lbl = tk.Label(card, text="", bg=CARD, fg=TEXT,
+                                   font=(FONT, 10), justify="left",
+                                   wraplength=560, anchor="w")
+        self._model_lbl.pack(anchor="w", padx=18, pady=(0, 4))
+        row = tk.Frame(card, bg=CARD)
+        row.pack(fill="x", padx=18, pady=(2, 14))
+        self._model_retry_btn = ttk.Button(row, text="重试下载",
+                                           command=self._model_retry,
+                                           state="disabled")
+        self._model_retry_btn.pack(side="left")
+        self._model_skip_btn = ttk.Button(row, text="跳过（转写不可用）",
+                                          command=self._model_skip)
+        self._model_skip_btn.pack(side="left", padx=(10, 0))
+        # ---- 人工下载通道（连续失败 >= 2 次后显示）----
+        manual = tk.Frame(card, bg="#fdf0ec", highlightthickness=1,
+                          highlightbackground="#f0c8b8")
+        self._manual_frame = manual
+        want = self._mdl.main_file_name(self.cfg)
+        tk.Label(manual, text="自动下载多次失败 — 可人工下载模型文件后导入：",
+                 bg="#fdf0ec", fg="#b3402a", font=(FONT, 11, "bold"),
+                 anchor="w").pack(fill="x", padx=12, pady=(10, 2))
+        tk.Label(manual, text=f"① 打开下方页面，下载文件「{want}」"
+                              "（约数百 MB，其他小文件会自动补齐）：",
+                 bg="#fdf0ec", fg=TEXT, font=(FONT, 10), justify="left",
+                 wraplength=560, anchor="w").pack(fill="x", padx=12)
+        btns = tk.Frame(manual, bg="#fdf0ec")
+        btns.pack(fill="x", padx=12, pady=(4, 2))
+        ttk.Button(btns, text="打开下载页面",
+                   command=self._manual_open_page).pack(side="left")
+        ttk.Button(btns, text="② 我已下载，导入…",
+                   command=self._manual_import).pack(side="left", padx=(8, 0))
+        self._manual_url_lbl = tk.Label(manual, text="", bg="#fdf0ec",
+                                        fg=SUB, font=("Menlo", 9),
+                                        justify="left", wraplength=560,
+                                        anchor="w")
+        self._manual_url_lbl.pack(fill="x", padx=12, pady=(2, 10))
+        manual.pack_forget()  # 默认隐藏，失败次数达标后显示
+
+    def _model_tick(self) -> None:
+        """轮询模型下载状态并刷新第 1 步 UI（300ms 一次，后台线程更新）。"""
+        try:
+            if getattr(self, "_page", -1) != 0:
+                return  # 已离开本页；返回时 _go(0) 会重建并重新轮询
+            st = self._mdl.DownloadState.get().snapshot()
+            state = st["state"]
+            if state == "idle":
+                # 首次进入：启动后台下载
+                self._mdl.start_background(self.cfg)
+                self._manual_hide()
+                self._model_status_lbl.config(text="准备下载…", fg=SUB)
+                self._model_lbl.config(
+                    text="正在检查本地缓存并准备下载，请稍候…")
+                self._next_btn.config(state="disabled")
+            elif state == "running":
+                phase, f = st["phase"], st["file_name"]
+                pct = st["percent"]
+                self._manual_hide()
+                self._model_bar.config(value=pct)
+                if f:
+                    self._model_lbl.config(
+                        text=f"正在下载 {phase} · {f}"
+                             f"（{self._mdl.fmt_bytes(st['completed'])}"
+                             f" / {self._mdl.fmt_bytes(st['total'])}"
+                             f" · {pct:.0f}%）")
+                else:
+                    self._model_lbl.config(text=f"正在下载 {phase} …")
+                self._model_status_lbl.config(text=f"下载中 {pct:.0f}%",
+                                              fg=AMBER)
+                self._next_btn.config(state="disabled")
+            elif state == "error":
+                self._model_bar.config(value=0)
+                self._model_status_lbl.config(text="下载失败", fg=RED)
+                self._model_lbl.config(
+                    text=f"✗ 语音识别模型下载失败：{st['error'][:220]}\n"
+                         "请检查网络（或关闭代理软件）后点「重试下载」；"
+                         "若不下载，开始录音后将看不到转写内容。",
+                    fg=RED)
+                self._next_btn.config(state="disabled")
+                self._model_retry_btn.config(state="normal")
+                self._model_skip_btn.config(state="normal")
+                # 连续失败 >= 2 次：亮出人工下载通道
+                if st["fail_count"] >= 2:
+                    self._manual_show()
+                else:
+                    self._manual_hide()
+            else:  # done
+                self._manual_hide()
+                if st["missing"]:
+                    # 声纹等可选部分缺失：不阻断录音，降级单人转写
+                    self._model_bar.config(value=100)
+                    self._model_status_lbl.config(
+                        text="✓ 语音识别就绪", fg=GREEN)
+                    self._model_lbl.config(
+                        text="语音识别模型已就绪；部分辅助模型未下载完整，"
+                             "将自动降级（不影响基本转写）。",
+                        fg=SUB)
+                    self._next_btn.config(state="normal")
+                    self._model_retry_btn.config(state="normal")
+                    self._model_skip_btn.config(state="disabled")
+                    return
+                self._model_bar.config(value=100)
+                self._model_status_lbl.config(text="✓ 已就绪", fg=GREEN)
+                self._model_lbl.config(
+                    text="识别模型已就绪，开始录音即可实时显示转写。",
+                    fg=GREEN)
+                self._next_btn.config(state="normal")
+                self._model_retry_btn.config(state="disabled")
+                self._model_skip_btn.config(state="disabled")
+                return  # 完成：停止轮询
+            self.root.after(300, self._model_tick)
+        except Exception:  # noqa: BLE001 轮询异常不影响向导其它步骤
+            self.root.after(300, self._model_tick)
+
+    def _welcome_next(self) -> None:
+        """第 1 步「下一步」：模型就绪才放行（按钮在下载中已禁用）。"""
+        st = self._mdl.DownloadState.get().snapshot()
+        if st["state"] != "done":
+            return
+        self._go(1)
+
+    def _model_retry(self) -> None:
+        st = self._mdl.DownloadState.get()
+        st._set(state="idle", error="", missing=self._mdl.missing(self.cfg))
+        self._model_status_lbl.config(text="准备重试…", fg=SUB)
+        self._model_retry_btn.config(state="disabled")
+        self._model_skip_btn.config(state="normal")
+        self.root.after(300, self._model_tick)
+
+    def _model_skip(self) -> None:
+        from tkinter import messagebox
+        yes = messagebox.askyesno(
+            "跳过模型下载",
+            "语音识别模型未就绪时，点「开始录音」后不会显示实时转写内容。\n\n"
+            "确定跳过？（可稍后在主界面点击「设置」→ 环境检查中重新下载）",
+            parent=self.win or self.root)
+        if yes:
+            self._go(1)
+
+    # ---------- 人工下载通道（自动下载连续失败 >= 2 次后亮出） ----------
+
+    def _manual_show(self) -> None:
+        try:
+            urls = self._mdl.manual_urls(self.cfg)
+            text = " ｜  ".join(f"{tag} {u}" for tag, u in urls)
+            self._manual_url_lbl.config(text=text)
+        except Exception:  # noqa: BLE001
+            pass
+        self._manual_frame.pack(fill="x", padx=18, pady=(0, 12))
+
+    def _manual_hide(self) -> None:
+        self._manual_frame.pack_forget()
+
+    def _manual_open_page(self) -> None:
+        import os
+        import subprocess
+        repo = self._mdl.whisper_repo(self.cfg)
+        endpoint = os.environ.get("HF_ENDPOINT") or self._mdl.DEFAULT_HF_ENDPOINT
+        url = f"{endpoint}/{repo}/tree/main"
+        try:
+            subprocess.Popen(["open", url])
+        except Exception as e:  # noqa: BLE001
+            self._model_lbl.config(text=f"无法打开浏览器：{e}", fg=RED)
+
+    def _manual_import(self) -> None:
+        from tkinter import filedialog
+        want = self._mdl.main_file_name(self.cfg)
+        path = filedialog.askopenfilename(
+            parent=self.win or self.root,
+            title=f"选择你已下载的模型文件（{want}）")
+        if not path:
+            return
+        self._model_status_lbl.config(text="导入中…", fg=AMBER)
+        self._model_lbl.config(
+            text=f"正在导入 {want} 到本地模型目录，随后自动补齐其余文件，请稍候…",
+            fg=AMBER)
+        self._model_retry_btn.config(state="disabled")
+        self._model_skip_btn.config(state="disabled")
+        threading.Thread(target=self._manual_import_worker, args=(path,),
+                         daemon=True).start()
+
+    def _manual_import_worker(self, path: str) -> None:
+        from . import model_download as mdl
+        ok, msg = mdl.import_main_file(self.cfg, path)
+        if not ok:
+            self.root.after(0, lambda: self._model_show_manual_err(msg))
+            return
+        st = mdl.DownloadState.get()
+        st._set(state="running", phase="补齐模型文件",
+                file_name="", completed=0, total=0)
+        try:
+            mdl.ensure_missing(self.cfg, state=st)  # 小文件 + 声纹，完成即 done
+        except Exception as e:  # noqa: BLE001
+            st._set(state="error", error=str(e))
+        # done/error 由 _model_tick 轮询刷新
+
+    def _model_show_manual_err(self, msg: str) -> None:
+        self._model_status_lbl.config(text="导入失败", fg=RED)
+        self._model_lbl.config(text=f"✗ {msg}", fg=RED)
+        self._model_retry_btn.config(state="normal")
+        self._model_skip_btn.config(state="normal")
 
     def _checks(self) -> list[tuple[str, bool, str]]:
         out: list[tuple[str, bool, str]] = []

@@ -19,7 +19,13 @@ err() {
 }
 trap err ERR
 
+# 2026-10-21 关键修复：huggingface_hub 新版默认走 Xet 存储后端下载大文件，
+# Xet 的 CAS 服务器(cas-server.xethub.hf.co)不在 hf-mirror.com 镜像覆盖范围内，
+# 镜像 + Xet 必然 401 Unauthorized（同事 v1.0.10 实测：ASR 预热失败 → 转写空白）。
+# HF_HUB_DISABLE_XET=1 强制回退普通 HTTP 下载，镜像随即生效。
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+export HF_HUB_DISABLE_XET=1
+export HF_HUB_DISABLE_PROGRESS_BARS=1
 VENV_PY=".venv/bin/python"
 
 echo "══════════════════════════════════════"
@@ -200,7 +206,8 @@ fi
 # ---------- 4. 启动录音界面 ----------
 echo ""
 echo "正在启动会议录音界面…"
-echo "（首次启动会自动下载语音识别模型，约数百 MB，默认走国内镜像 hf-mirror.com，请耐心等待）"
+echo "（首次使用会在向导第 1 步自动下载语音识别模型，界面内实时显示进度；"
+echo "  下载连续失败时会给出直链，可人工下载后导入）"
 echo "若界面未弹出，请把本窗口内容截图发给测试负责人。"
 echo ""
 "$VENV_PY" run_recorder.py

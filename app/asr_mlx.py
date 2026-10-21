@@ -13,6 +13,7 @@ import numpy as np
 from huggingface_hub import snapshot_download
 
 from . import asr as asr_mod
+from . import model_download as mdl
 from . import punctuate as punc_mod
 
 logger = logging.getLogger(__name__)
@@ -29,10 +30,13 @@ def get_model(cfg: dict) -> str:
     if os.path.isdir(name):
         _CACHE[name] = os.path.abspath(name)
         return _CACHE[name]
-    # 让 huggingface_hub 走 config 里的镜像
-    hf = cfg.get("hf_endpoint")
-    if hf:
-        os.environ["HF_ENDPOINT"] = hf
+    # 人工下载优先:主权重已导入本地目录时直接使用本地模型
+    local_dir = mdl.local_asr_dir(cfg)
+    if local_dir:
+        _CACHE[name] = local_dir
+        return local_dir
+    # 禁用 Xet + 指镜像（否则镜像下大文件 401，2026-10-21 同事实测）
+    mdl.setup_env(cfg)
     logger.info("正在准备 MLX 模型: %s", name)
     try:
         # 优先本地缓存，避免运行时联网

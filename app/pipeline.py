@@ -10,6 +10,7 @@ from datetime import datetime
 import numpy as np
 
 from . import diarize as diarize_mod
+from . import model_download as mdl
 from . import store
 from . import vad
 from .diarize import SpeakerRegistry
@@ -34,9 +35,27 @@ def _load_asr(cfg: dict):
 
 
 def preload_models(cfg: dict) -> None:
-    """应用启动时后台预热识别模型，消除首次转写的冷加载延迟。"""
+    """应用启动时后台准备识别模型（GUI 可感知进度）。
+
+    v1.0.11 改进（2026-10-21，同事机器修复）：
+    此前模型下载走 hugggingface_hub 默认 Xet 协议 → 镜像下 401 → ASR 预热
+    静默失败 → 转写区永远不出字且无进度提示。现在：
+    1. 缺失模型先**带进度**下载（写全局 DownloadState，gui 轮询展示）；
+    2. 下载完成再加载 whisper / 声纹 / VAD，消除首次转写的冷等待。
+    """
     def _run():
+        from . import model_download as mdl
+        mdl.resolve_backend(cfg)   # Intel 机切 faster-whisper（防双份下载）
+        mdl.setup_env(cfg)
+        st = mdl.DownloadState.get()
+        try:
+            # 缺失模型先下载（内部自动跳过已缓存项）
+            mdl.ensure_missing(cfg, state=st)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("识别模型下载未完成: %s", e)
         asr_mod = _load_asr(cfg)
+        if not mdl.asr_ready(cfg):
+            logger.warning("语音识别模型未就绪，转写将不可用（请检查网络后重启）")
         try:
             asr_mod.get_model(cfg)
             logger.info("ASR 模型预热完成 (%s)", cfg["asr"].get("backend", "mlx"))
@@ -177,7 +196,19 @@ class MeetingSession:
                     continue
 
                 if first_call:
-                    self._post("sys", f"首次使用：正在加载 {backend} 识别模型，请稍候…")
+                    # v1.0.11：模型未就绪时等待下载完成再转写（不并发下载），
+                    # 进度由 GUI 顶部状态条展示（与向导共用 DownloadState）。
+                    if not mdl.asr_ready(self.cfg):
+                        st_state = mdl.DownloadState.get().snapshot()["state"]
+                        if st_state == "running":
+                            self._post("sys", "⏳ 识别模型正在下载"
+                                               "（请看界面顶部进度），"
+                                               "完成后自动开始转写…")
+                        else:
+                            self._post("sys", "识别模型未就绪，"
+                                               "正在准备下载，请稍候…")
+                        continue
+                    self._post("sys", f"正在加载 {backend} 识别模型，请稍候…")
                 try:
                     segments = asr_mod.transcribe(self.cfg, seg_audio, self.rec.sample_rate)
                 except Exception as e:  # noqa: BLE001

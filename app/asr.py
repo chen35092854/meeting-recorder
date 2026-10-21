@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import model_download as mdl
 from . import punctuate as punc_mod
 
 _MODELS = {}  # model_size -> model
@@ -14,8 +15,14 @@ def get_model(cfg: dict):
     size = c.get("model_size", "small")
     if size not in _MODELS:
         from faster_whisper import WhisperModel
+        # 2026-10-21:必须禁用 Xet + 走镜像,否则大陆/内网下模型下载
+        # 被重定向到 cas-server.xethub.hf.co 必然 401(faster-whisper
+        # 内部也是 huggingface_hub 下载,环境变量对它同样生效)。
+        mdl.setup_env(cfg)
+        # 人工下载优先:主权重已导入本地目录时直接使用本地模型
+        local_dir = mdl.local_asr_dir(cfg)
         _MODELS[size] = WhisperModel(
-            size,
+            local_dir or size,
             device=c.get("device", "cpu"),
             compute_type=c.get("compute_type", "int8"),
         )

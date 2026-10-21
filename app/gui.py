@@ -12,6 +12,7 @@ import traceback
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+from . import model_download as mdl
 from . import store
 from .pipeline import MeetingSession, SPEAKER_COLORS
 
@@ -71,6 +72,7 @@ class RecorderApp:
         self.dev_index_map: dict[str, int] = {}
         self._last_status_state = None
         self._mute_secs = 0.0
+        self._mdl_warned = False   # 模型下载失败是否已提示（只提示一次）
         # 显示模型：全量重建转写区，避免 Tk index/mark 锚点在增量删除时
         # 漂移造成的"累积重复"（2026-10-19 根因修复，见 replays/display_layer.md）
         self._display_items: list[dict] = []  # {"kind": "utt", "utt": u} | {"kind": "msg", "tag": t, "text": s}
@@ -330,6 +332,7 @@ class RecorderApp:
             self._refresh_level()  # 未录音时也维持电平条 UI（灰条 + -∞）
         if self.waiting_ai:
             self._poll_ai_status()
+        self._model_dl_status()
         self.root.after(150, self._poll)
 
     def _handle(self, kind: str, payload) -> None:
@@ -398,6 +401,47 @@ class RecorderApp:
             self.status_var.set("纪要生成失败")
             self.stage_var.set(st.get("error") or "失败")
             self._append("err", f"\n纪要生成失败：{st.get('error')}\n")
+
+    # ================= 模型下载进度兜底（v1.0.11） =================
+    # 场景：向导第 1 步被「跳过」/ 旧版本升级 / 首次启动过早 —— 模型未就绪时
+    # 主界面直接显示下载进度（与向导共用全局 DownloadState），不再静默等待。
+    def _model_dl_status(self) -> None:
+        if self.finalizing:
+            return
+        st = mdl.DownloadState.get().snapshot()
+        state = st["state"]
+        if state == "running":
+            self._mdl_warned = False
+            pct = st["percent"]
+            phase, f = st["phase"], st["file_name"]
+            if f:
+                text = (f"⏳ {phase} 下载中 · {f}"
+                        f"（{mdl.fmt_bytes(st['completed'])}"
+                        f" / {mdl.fmt_bytes(st['total'])} · {pct:.0f}%）")
+            else:
+                text = f"⏳ {phase} 下载中 …"
+            self.status_var.set(text)
+            self.stage_var.set(f"模型下载 {pct:.0f}%")
+            self.progress.config(value=max(5, min(95, int(pct))))
+        elif state == "error":
+            if not self._mdl_warned:
+                self._mdl_warned = True
+                self._append("err",
+                             f"\n[语音识别模型下载失败] {st['error'][:180]}\n"
+                             "请检查网络（或关闭代理）后重启应用，向导会自动继续下载；"
+                             "若多次失败，可点「设置」→ 环境检查，按提示打开页面"
+                             "人工下载模型文件后导入。\n")
+                self.status_var.set("语音识别模型下载失败（详见下方红色提示）")
+                self.stage_var.set("模型下载失败")
+                self.progress.config(value=0)
+        elif state == "done":
+            if self._mdl_warned:
+                self._mdl_warned = False
+            # 下载完成：恢复录音主状态（若正在录音）
+            if self.recording and not self.finalizing:
+                self.status_var.set(
+                    "● 录音中 — 说话时电平条应跳动（声纹自动区分发言人）")
+                self.stage_var.set("")
 
     def _tick(self) -> None:
         if self.recording and not self.finalizing:

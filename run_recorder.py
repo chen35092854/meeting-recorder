@@ -21,6 +21,11 @@ def main() -> int:
     from app import config
     cfg = config.load()
 
+    # v1.0.11：非 Apple Silicon 自动固化 faster-whisper 后端（避免 Intel
+    # 机先白下 MLX 模型再回退下载第二套），写回 config.json
+    from app import model_download as mdl
+    mdl.resolve_backend(cfg)
+
     log_dir = config.APP_DIR / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
