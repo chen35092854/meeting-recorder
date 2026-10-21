@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import threading
 import tkinter as tk
@@ -24,6 +25,8 @@ from tkinter import filedialog, ttk
 
 from . import config as cfg_mod
 from . import summarize
+
+logger = logging.getLogger(__name__)
 
 # 与 gui.py 一致的设计体系（浅色）
 BG, CARD, BORDER = "#f4f5f8", "#ffffff", "#e3e6ec"
@@ -227,6 +230,26 @@ class SetupWizard:
         self._model_skip_btn = ttk.Button(row, text="跳过（转写不可用）",
                                           command=self._model_skip)
         self._model_skip_btn.pack(side="left", padx=(10, 0))
+        # ---- 下载源选择（v1.1.0：国内镜像 / 魔搭 双源，可固定也可自动择优）----
+        srcrow = tk.Frame(card, bg=CARD)
+        srcrow.pack(fill="x", padx=18, pady=(0, 10))
+        tk.Label(srcrow, text="下载源：", bg=CARD, fg=TEXT,
+                 font=(FONT, 11)).pack(side="left")
+        cur = str((self.cfg.get("download") or {}).get("source", "auto"))
+        label_map = {"auto": "自动（推荐）",
+                     "hf_mirror": "国内镜像 hf-mirror",
+                     "modelscope": "魔搭 ModelScope"}
+        self._model_src_var = tk.StringVar(
+            value=label_map.get(cur, "自动（推荐）"))
+        combo = ttk.Combobox(srcrow, textvariable=self._model_src_var,
+                             state="readonly", width=26, height=6,
+                             values=("自动（推荐）", "国内镜像 hf-mirror",
+                                     "魔搭 ModelScope"), font=(FONT, 10))
+        combo.pack(side="left", padx=(4, 0))
+        combo.bind("<<ComboboxSelected>>", self._model_src_changed)
+        self._note(card, "自动模式会在下载前对两源测速，自动选择当前网络"
+                         "更快的一个；切换后若处于失败状态会自动重试。",
+                   SUB, CARD)
         # ---- 人工下载通道（连续失败 >= 2 次后显示）----
         manual = tk.Frame(card, bg="#fdf0ec", highlightthickness=1,
                           highlightbackground="#f0c8b8")
@@ -341,6 +364,34 @@ class SetupWizard:
         self._model_retry_btn.config(state="disabled")
         self._model_skip_btn.config(state="normal")
         self.root.after(300, self._model_tick)
+
+    def _model_src_changed(self, _event=None) -> None:
+        """下载源切换：写回 config；处于失败状态时重置并按新源自动重试。"""
+        val = self._model_src_var.get()
+        src = {"自动（推荐）": "auto",
+               "国内镜像 hf-mirror": "hf_mirror",
+               "魔搭 ModelScope": "modelscope"}.get(val, "auto")
+        self.cfg.setdefault("download", {})["source"] = src
+        try:
+            cfg_mod.save(self.cfg)
+        except Exception:  # noqa: BLE001
+            pass
+        # 清空测速缓存：回到「自动」时重新对本网测速，而非沿用旧结果
+        self._mdl._fastest_cache.clear()
+        logger.info("下载源已切换为 %s", src)
+        st = self._mdl.DownloadState.get()
+        if st.snapshot()["state"] == "error":
+            st.fail_count = 0
+            st._set(state="idle", error="",
+                    missing=self._mdl.missing(self.cfg))
+            self._manual_hide()
+            self._model_status_lbl.config(text="已切换下载源，准备重试…",
+                                          fg=AMBER)
+            self._model_lbl.config(
+                text="正在按新的下载源重新下载，请稍候…", fg=TEXT)
+            self._next_btn.config(state="disabled")
+            self._model_retry_btn.config(state="disabled")
+            self.root.after(300, self._model_tick)
 
     def _model_skip(self) -> None:
         from tkinter import messagebox

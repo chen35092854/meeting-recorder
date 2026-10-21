@@ -55,6 +55,9 @@ DEFAULTS = {
         "save_wav": True,               # 是否保留原始录音
     },
     "hf_endpoint": "https://hf-mirror.com",  # 模型下载镜像；大陆网络必需
+    "download": {
+        "source": "auto",               # 模型下载源: auto(双源测速择优) / hf_mirror / modelscope
+    },
     "llm": {                            # 备用：仅供本地调试，正式纪要由 WorkBuddy 内置模型生成
         "provider": "auto",             # auto / ollama / openai / builtin
         "ollama_url": "http://localhost:11434",

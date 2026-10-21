@@ -24,6 +24,9 @@ import json
 import logging
 import os
 import threading
+import time
+import urllib.parse
+import urllib.request
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +114,8 @@ def asr_ready(cfg: dict) -> bool:
 def spk_ready(cfg: dict) -> bool:
     if not cfg.get("diarize", {}).get("enabled", True):
         return True
+    if local_spk_dir(cfg):
+        return True  # 本地模型目录已就绪（人工下载或魔搭落盘）
     return _snapshot_exists(spk_repo(cfg))
 
 
@@ -145,16 +150,18 @@ def main_file_name(cfg: dict) -> str:
 
 
 def manual_urls(cfg: dict) -> list[tuple[str, str]]:
-    """人工下载直链列表 [(标签, URL), ...]（镜像优先，官网备用）。"""
+    """人工下载直链列表 [(标签, URL), ...]（镜像优先，魔搭/官网备用）。"""
     repo = whisper_repo(cfg)
     fn = main_file_name(cfg)
     hf = os.environ.get("HF_ENDPOINT") or DEFAULT_HF_ENDPOINT
-    return [
+    urls = [
         ("国内镜像直链（优先）",
          f"{hf}/{repo}/resolve/main/{fn}"),
+        ("魔搭直链（备选）", _ms_resolve(ms_repo(repo), fn)),
         ("官网直链（备选）",
          f"https://huggingface.co/{repo}/resolve/main/{fn}"),
     ]
+    return urls
 
 
 def local_asr_dir(cfg: dict) -> str | None:
@@ -321,7 +328,7 @@ def ensure_missing(cfg: dict, state: DownloadState | None = None,
                            file_name="", completed=0, total=0, percent=0.0,
                            error="")
             try:
-                _download_snapshot(repo_asr, state, progress_cb)
+                _ensure_asr(cfg, state, progress_cb)
             except Exception as e:  # noqa: BLE001
                 ok = False
                 logger.warning("语音识别模型下载失败: %s", e)
@@ -337,16 +344,14 @@ def ensure_missing(cfg: dict, state: DownloadState | None = None,
         except Exception as e:  # noqa: BLE001
             logger.warning("补齐本地模型小文件失败: %s", e)
 
-    if cfg.get("diarize", {}).get("enabled", True):
-        repo_spk = spk_repo(cfg)
-        if not _snapshot_exists(repo_spk):
-            if state is not None:
-                state._set(state="running", phase="声纹模型(Speaker)",
-                           file_name="", completed=0, total=0, percent=0.0)
-            try:
-                _download_snapshot(repo_spk, state, progress_cb)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("声纹模型下载失败（可降级单人转写）: %s", e)
+    if cfg.get("diarize", {}).get("enabled", True) and not spk_ready(cfg):
+        if state is not None:
+            state._set(state="running", phase="声纹模型(Speaker)",
+                       file_name="", completed=0, total=0, percent=0.0)
+        try:
+            _ensure_spk(cfg, state, progress_cb)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("声纹模型下载失败（可降级单人转写）: %s", e)
 
     if state is not None:
         state.fail_count = 0  # 全部（或可降级部分）处理完成即清零
@@ -376,3 +381,307 @@ def start_background(cfg: dict) -> None:
             st._set(state="error", error=str(e))
 
     threading.Thread(target=_run, daemon=True, name="model-download").start()
+
+
+# ---------- 魔搭(ModelScope)下载源（v1.1.0） ----------
+# 需求背景：hf-mirror 在部分国内网络下仍偏慢（同事反馈）。魔搭提供与 HF
+# 同构的 resolve/master 直链，不用安装 modelscope 库，纯 HTTP 即可下载，
+# 无需鉴权。实测两源各有优劣（开发机 hf-mirror 24.9MB/s > 魔搭 1.34MB/s），
+# 因此不硬编码单一源：config download.source = auto（默认，下载前 A/B 测速
+# 择优）| hf_mirror | modelscope。
+#
+# 关键设计：魔搭下载直接落到「本地模型目录」（LOCAL_WHISPER_DIR / LOCAL_SPK_DIR），
+# 与人工下载通道共用同一加载优先级（asr/asr_mlx 本地目录优先），无需改动
+# 任何加载层代码；声纹目录随后由 diarize.py 优先读取。
+
+MS_ENDPOINT = "https://modelscope.cn"
+
+# HF 仓库 -> 魔搭仓库 映射（魔搭侧均实测存在）
+MS_REPO_MAP = {
+    "mlx-community/whisper-small-mlx": "mlx-community/whisper-small-mlx",
+    "speechbrain/spkrec-ecapa-voxceleb": "speechbrain/spkrec-ecapa-voxceleb",
+}
+
+# 魔搭上下载的声纹模型落盘目录（diarize.py 加载时优先读取）
+LOCAL_SPK_DIR = os.path.join(os.path.expanduser("~"), ".cache",
+                             "workbuddy", "spkrec-ms")
+
+
+def ms_repo(hf_repo: str) -> str:
+    """HF 仓库名 -> 魔搭仓库名（未知仓库默认同名尝试）。"""
+    if hf_repo in MS_REPO_MAP:
+        return MS_REPO_MAP[hf_repo]
+    if hf_repo.startswith("Systran/faster-whisper-"):
+        size = hf_repo[len("Systran/faster-whisper-"):]
+        return f"pengzhendong/faster-whisper-{size}"
+    return hf_repo
+
+
+def local_spk_dir(cfg: dict) -> str | None:
+    """返回声纹模型本地目录（主权重已就位），否则 None。"""
+    d = LOCAL_SPK_DIR
+    if os.path.isdir(d) and os.path.isfile(
+            os.path.join(d, "embedding_model.ckpt")):
+        return d
+    return None
+
+
+def _ms_get(url: str, timeout: float = 20.0) -> bytes | None:
+    """GET 请求（跟随重定向），失败返回 None。"""
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "meeting-recorder/1.1"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("魔搭请求失败 %s: %s", url, e)
+        return None
+
+
+def ms_file_list(repo: str, revision: str = "master") -> list[dict]:
+    """拉取魔搭仓库文件清单 [{path, size, sha256}...]，失败返回空列表。
+
+    文件列表 API：GET {MS_ENDPOINT}/api/v1/models/{repo}/repo/files
+    返回 Code=200 且 Data.Files[] 含 Path/Size/Sha256（无需鉴权）。
+    """
+    url = (f"{MS_ENDPOINT}/api/v1/models/{repo}/repo/files"
+           f"?Revision={revision}")
+    raw = _ms_get(url)
+    if not raw:
+        return []
+    try:
+        j = json.loads(raw.decode("utf-8"))
+        files = (j.get("Data") or {}).get("Files") or []
+        out = []
+        for f in files:
+            path = str(f.get("Path") or "")
+            if not path or f.get("Type") == "tree":
+                continue
+            out.append({"path": path,
+                        "size": int(f.get("Size") or 0),
+                        "sha256": str(f.get("Sha256") or "")})
+        return out
+    except Exception as e:  # noqa: BLE001
+        logger.warning("解析魔搭文件列表失败: %s", e)
+        return []
+
+
+def _ms_resolve(repo: str, filename: str) -> str:
+    """魔搭模型文件直链（resolve/master/{文件}）。"""
+    fn = urllib.parse.quote(filename)
+    return f"{MS_ENDPOINT}/models/{repo}/resolve/master/{fn}"
+
+
+def _download_url(url: str, dest: str, total_size: int,
+                  progress_cb=None, use_range: bool = True) -> bool:
+    """HTTP 下载到 dest：多数源走 Range 断点续传；魔搭禁用续传整文件重下。
+
+    为什么魔搭要禁用续传（v1.1.0 实测）：魔搭 CDN 对 Range 请求不规范——
+    返回 200（而非 206）+ 按 Range 切片响应体 + Content-Length 却声称全长，
+    导致续传要么前段丢失损坏文件，要么抛 IncompleteRead。故魔搭（use_range
+    =False）中断后删除 .part 整文件重下；hf-mirror 等标准 206 源不受影响。
+    成功/失败路径均不损坏已下载部分（失败保留 .part）。
+    """
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    tmp = dest + ".part"
+    if not use_range and os.path.isfile(tmp):
+        try:
+            os.remove(tmp)  # 魔搭不可续传：丢弃上次中断残留，整文件重下
+        except OSError:
+            pass
+    exist = os.path.getsize(tmp) if os.path.isfile(tmp) else 0
+    if total_size > 0 and exist >= total_size:
+        os.replace(tmp, dest)
+        return True
+    headers = {"User-Agent": "meeting-recorder/1.1"}
+    if use_range and exist:
+        headers["Range"] = f"bytes={exist}-"
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            if use_range and exist and resp.getcode() == 206:
+                mode, got = "ab", exist  # 标准 206：从断点追加
+            else:
+                mode, got = "wb", 0      # 全量覆盖（服务端忽略 Range 或未启用续传）
+            with open(tmp, mode) as f:
+                while True:
+                    chunk = resp.read(256 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    got += len(chunk)
+                    if progress_cb is not None:
+                        progress_cb(got, total_size)
+        os.replace(tmp, dest)
+        return True
+    except Exception as e:  # noqa: BLE001
+        have = os.path.getsize(tmp) if os.path.isfile(tmp) else 0
+        logger.warning("下载中断 %s（已下载 %.1f MB）: %s",
+                       dest, have / 1e6, e)
+        return False
+
+
+def _download_repo_from_ms(cfg: dict, repo_hf: str, dest_dir: str,
+                           required: tuple[str, ...] | None,
+                           phase: str, state: DownloadState | None,
+                           progress_cb) -> bool:
+    """从魔搭把整个仓库下载到本地目录（主权重 + 全部小文件）。
+
+    required: 必须成功的关键文件相对路径（如主权重），缺失即抛错（触发
+    外部回退另一下载源）。进度走「全仓库字节数」+ 当前文件名。
+    """
+    repo_ms = ms_repo(repo_hf)
+    files = ms_file_list(repo_ms)
+    if not files:
+        raise RuntimeError(f"魔搭仓库 {repo_ms} 文件清单获取失败")
+    if required:
+        names = {f["path"] for f in files}
+        miss = [r for r in required if r not in names]
+        if miss:
+            raise RuntimeError(f"魔搭仓库 {repo_ms} 缺少必需文件: {miss}")
+
+    os.makedirs(dest_dir, exist_ok=True)
+    pg = {"done": 0, "total": sum(f["size"] for f in files),
+          "file": "", "base": 0}
+
+    def _cb(done_c: int, total_c: int) -> None:
+        pg["done"] = pg["base"] + (done_c or 0)
+        if state is not None:
+            state._set(phase=phase, file_name=pg["file"],
+                       completed=pg["done"], total=pg["total"] or total_c)
+        if progress_cb is not None:
+            progress_cb(pg["file"], pg["done"], pg["total"] or total_c)
+
+    for f in files:
+        rel = f["path"]
+        if rel.endswith("/"):
+            continue
+        dest = os.path.join(dest_dir, rel)
+        total_f = f["size"]
+        if (os.path.isfile(dest) and total_f > 0
+                and os.path.getsize(dest) == total_f):
+            pg["done"] += total_f  # 已存在（含续传完成）直接计入
+            continue
+        pg["file"] = rel
+        pg["base"] = pg["done"]
+        # 魔搭 CDN 不支持标准 206 续传（见 _download_url 注释）→ use_range=False
+        okc = _download_url(_ms_resolve(repo_ms, rel), dest, total_f, _cb,
+                            use_range=False)
+        if not okc:
+            raise RuntimeError(f"魔搭下载失败: {repo_ms}/{rel}")
+    if state is not None:
+        state._set(file_name="", completed=pg["total"], total=pg["total"],
+                   percent=100.0)
+    return True
+
+
+# 进程内测速结果缓存：同一 (repo, 文件) 只测速一次，避免每次启动重复浪费流量
+_fastest_cache: dict[str, str] = {}
+
+
+def _pick_fastest(cfg: dict, repo_hf: str, fn: str) -> str:
+    """A/B 测速：镜像 vs 魔搭各拉该文件前 2MB，返回较快源。
+
+    两者都未取得有效数据时回退 hf_mirror（其有断点续传 + 人工通道兜底）。
+    """
+    key = f"{repo_hf}|{fn}"
+    if key in _fastest_cache:
+        return _fastest_cache[key]
+    hf = os.environ.get("HF_ENDPOINT") or DEFAULT_HF_ENDPOINT
+    probes = {
+        "hf_mirror": f"{hf}/{repo_hf}/resolve/main/{urllib.parse.quote(fn)}",
+        "modelscope": _ms_resolve(ms_repo(repo_hf), fn),
+    }
+    fastest, best = "hf_mirror", 1e18
+    for name, url in probes.items():
+        t0 = time.time()
+        got = 0
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "meeting-recorder/1.1",
+                              "Range": "bytes=0-2097151"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                while got < 2 * 1024 * 1024:
+                    chunk = resp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    got += len(chunk)
+            dur = max(time.time() - t0, 1e-6)
+            logger.info("下载源测速 %s（%s）: %.2f MB/s",
+                        name, fn, got / dur / 1e6)
+            if got >= 256 * 1024 and dur < best:
+                fastest, best = name, dur
+        except Exception as e:  # noqa: BLE001
+            logger.warning("下载源测速 %s 失败: %s", name, e)
+    _fastest_cache[key] = fastest
+    return fastest
+
+
+def choose_source(cfg: dict) -> str:
+    """读取配置的下载源：auto（默认）| hf_mirror | modelscope。"""
+    src = str((cfg.get("download") or {}).get("source", "auto")).lower()
+    if src in ("modelscope", "ms", "魔搭"):
+        return "modelscope"
+    if src in ("hf_mirror", "hf", "mirror", "镜像"):
+        return "hf_mirror"
+    return "auto"
+
+
+def _source_order(cfg: dict, repo_hf: str, probe_file: str) -> list[str]:
+    """决定下载源尝试顺序：auto 时先测速（快者先，另一源回退）。"""
+    src = choose_source(cfg)
+    if src == "modelscope":
+        return ["modelscope", "hf_mirror"]
+    if src == "hf_mirror":
+        return ["hf_mirror"]
+    first = _pick_fastest(cfg, repo_hf, probe_file)
+    second = "hf_mirror" if first == "modelscope" else "modelscope"
+    return [first, second]
+
+
+def _ensure_asr(cfg: dict, state: DownloadState | None,
+                progress_cb=None) -> None:
+    """自动下载缺失的 ASR 模型；按源择优 + 失败自动回退另一源。"""
+    repo_asr = whisper_repo(cfg)
+    if local_asr_dir(cfg) is not None:
+        return
+    if _snapshot_exists(repo_asr):
+        return
+    last_err: Exception | None = None
+    for s in _source_order(cfg, repo_asr, main_file_name(cfg)):
+        try:
+            if s == "modelscope":
+                _download_repo_from_ms(cfg, repo_asr, LOCAL_WHISPER_DIR,
+                                       required=(main_file_name(cfg),),
+                                       phase="语音识别模型(Whisper)",
+                                       state=state, progress_cb=progress_cb)
+            else:
+                _download_snapshot(repo_asr, state, progress_cb)
+            return
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            logger.warning("从 %s 下载语音识别模型失败: %s", s, e)
+    raise RuntimeError(str(last_err) or "语音识别模型下载失败")
+
+
+def _ensure_spk(cfg: dict, state: DownloadState | None,
+                progress_cb=None) -> None:
+    """自动下载缺失的声纹模型（本地目录优先落盘）。失败抛错由上层降级。"""
+    repo_spk = spk_repo(cfg)
+    if spk_ready(cfg):
+        return
+    last_err: Exception | None = None
+    for s in _source_order(cfg, repo_spk, "embedding_model.ckpt"):
+        try:
+            if s == "modelscope":
+                _download_repo_from_ms(cfg, repo_spk, LOCAL_SPK_DIR,
+                                       required=("embedding_model.ckpt",),
+                                       phase="声纹模型(Speaker)",
+                                       state=state, progress_cb=progress_cb)
+            else:
+                _download_snapshot(repo_spk, state, progress_cb)
+            return
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            logger.warning("从 %s 下载声纹模型失败: %s", s, e)
+    raise RuntimeError(str(last_err) or "声纹模型下载失败")

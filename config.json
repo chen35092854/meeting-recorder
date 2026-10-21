@@ -41,6 +41,9 @@
     "save_wav": true
   },
   "hf_endpoint": "https://hf-mirror.com",
+  "download": {
+    "source": "auto"
+  },
   "llm": {
     "provider": "auto",
     "ollama_url": "http://localhost:11434",

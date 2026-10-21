@@ -7,33 +7,70 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 CACHE_ROOT = os.path.join(os.path.expanduser("~"), ".cache", "workbuddy", "spkrec")
 
 _ENCODER = None  # 模块级单例：预热一次，所有会话共享
 
 
+def _resolve_local_source(model_name: str) -> str | None:
+    """优先返回本地声纹模型目录（魔搭落盘 / 人工下载），否则 None。
+
+    SpeechBrain 的 source 支持本地目录（须含 hyperparams.yaml 才能解析
+    embedding_model.ckpt/post_process.ckpt），加载时不联网。与
+    model_download.LOCAL_SPK_DIR（~/.cache/workbuddy/spkrec-ms）配合。
+    """
+    try:
+        from . import model_download as mdl
+        d = mdl.local_spk_dir({"diarize": {"model": model_name}})
+        if d and os.path.isfile(os.path.join(d, "hyperparams.yaml")):
+            return d
+    except Exception:  # noqa: BLE001 本地目录不可用时回退 HF 源
+        pass
+    return None
+
+
 def get_encoder(model_name: str):
-    """加载（或复用已缓存的）ECAPA 声纹编码器。"""
+    """加载（或复用已缓存的）ECAPA 声纹编码器。
+
+    优先从本地模型目录加载（魔搭/人工通道落盘），缺失或加载失败再回退
+    HuggingFace 源（snapshot 缓存）。同一模型只预热一次，全局共享。
+    """
     global _ENCODER
     if _ENCODER is None:
         os.makedirs(CACHE_ROOT, exist_ok=True)  # 预建缓存目录，避免 speechbrain mkdir 竞态 EEXIST
         from speechbrain.inference.speaker import EncoderClassifier
-        try:
-            _ENCODER = EncoderClassifier.from_hparams(
-                source=model_name,
-                savedir=CACHE_ROOT,
-                run_opts={"device": "cpu"},
-            )
-        except FileExistsError:  # 与预热线程并发建目录的竞态：重试一次
-            _ENCODER = EncoderClassifier.from_hparams(
-                source=model_name,
-                savedir=CACHE_ROOT,
-                run_opts={"device": "cpu"},
-            )
+        sources = [s for s in (_resolve_local_source(model_name), model_name) if s]
+        last_err: Exception | None = None
+        for src in sources:
+            try:
+                _ENCODER = EncoderClassifier.from_hparams(
+                    source=src,
+                    savedir=CACHE_ROOT,
+                    run_opts={"device": "cpu"},
+                )
+                break
+            except FileExistsError:  # 与预热线程并发建目录的竞态：重试一次
+                try:
+                    _ENCODER = EncoderClassifier.from_hparams(
+                        source=src,
+                        savedir=CACHE_ROOT,
+                        run_opts={"device": "cpu"},
+                    )
+                    break
+                except Exception as e:  # noqa: BLE001
+                    last_err = e
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                logger.warning("从 %s 加载声纹模型失败，尝试下一源", src)
+        if _ENCODER is None:
+            raise RuntimeError(f"声纹模型加载失败: {last_err}")
     return _ENCODER
 
 
