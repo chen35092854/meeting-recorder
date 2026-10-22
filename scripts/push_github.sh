@@ -120,9 +120,22 @@ if fail:
     print("\n以下 refs 未同步（原因见上）：")
     for f in fail:
         print("  ⚠ " + f)
-    sys.exit(1)
+    sys.exit(2)
 print("\n✔ REST API 兜底同步完成")
 PY
+  SYNC_RC=$?
+  if [ "$SYNC_RC" -ne 0 ]; then
+    echo ""
+    echo ">>> REST refs 同步不足（main 的新 commit 对象无法经 REST 上传），"
+    echo ">>> 改走 Git Data API 全链同步（重建 blob→tree→commit→ref）..."
+    PYV=$([ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)
+    if "$PYV" scripts/gh_data_sync.py; then
+      echo "✔ Git Data API 同步完成（远程为重建 commit，内容与本地一致）"
+      echo "  提示：网络恢复后重跑本脚本一次，可让两边 commit sha 完全对齐"
+    else
+      echo "⚠ Git Data API 同步失败（网络仍受阻），恢复网络后重跑：bash scripts/push_github.sh"
+    fi
+  fi
 fi
 
 # ---------- 3. 还原 remote（去掉凭据） ----------
